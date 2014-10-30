@@ -26,7 +26,7 @@ from .sale import ENDICIA_PACKAGE_TYPES, MAILPIECE_SHAPES
 
 __metaclass__ = PoolMeta
 __all__ = [
-    'ShipmentOut', 'GenerateEndiciaLabelMessage', 'GenerateEndiciaLabel',
+    'ShipmentOut', 'ShippingEndiciaConfiguration', 'GenerateShippingLabel',
     'EndiciaRefundRequestWizardView', 'EndiciaRefundRequestWizard',
     'BuyPostageWizardView', 'BuyPostageWizard',
 ]
@@ -234,17 +234,11 @@ class ShipmentOut:
         Attachment = Pool().get('ir.attachment')
         EndiciaConfiguration = Pool().get('endicia.configuration')
 
-        if self.state not in ('packed', 'done'):
-            self.raise_user_error('invalid_state')
-
         if not (
             self.carrier and
             self.carrier.carrier_cost_method == 'endicia'
         ):
             self.raise_user_error('wrong_carrier')
-
-        if self.tracking_number:
-            self.raise_user_error('tracking_number_already_present')
 
         endicia_credentials = EndiciaConfiguration(1).get_endicia_credentials()
 
@@ -380,40 +374,6 @@ class ShipmentOut:
         Check if shipping is from USPS
         """
         return self.carrier and self.carrier.carrier_cost_method == 'endicia'
-
-
-class GenerateEndiciaLabelMessage(ModelView):
-    'Generate Endicia Labels Message'
-    __name__ = 'generate.endicia.label.message'
-
-    tracking_number = fields.Char("Tracking number", readonly=True)
-
-
-class GenerateEndiciaLabel(Wizard):
-    'Generate Endicia Labels'
-    __name__ = 'generate.endicia.label'
-
-    start = StateView(
-        'generate.endicia.label.message',
-        'endicia_integration.generate_endicia_label_message_view_form',
-        [
-            Button('Ok', 'end', 'tryton-ok'),
-        ]
-    )
-
-    def default_start(self, data):
-        Shipment = Pool().get('stock.shipment.out')
-
-        try:
-            shipment, = Shipment.browse(Transaction().context['active_ids'])
-        except ValueError:
-            self.raise_user_error(
-                'This wizard can be called for only one shipment at a time'
-            )
-
-        tracking_number = shipment.make_endicia_labels()
-
-        return {'tracking_number': str(tracking_number)}
 
 
 class EndiciaRefundRequestWizardView(ModelView):
@@ -569,3 +529,102 @@ class BuyPostageWizard(Wizard):
         default['response'] = str(result.ErrorMessage) \
             if hasattr(result, 'ErrorMessage') else 'Success'
         return default
+
+
+class ShippingEndiciaConfiguration(ModelView):
+    'Endicia Configuration'
+    __name__ = 'shipping.carrier.endicia_configuration'
+
+    endicia_mailclass = fields.Many2One('endicia.mailclass', 'MailClass')
+    endicia_mailpiece_shape = fields.Selection(
+        MAILPIECE_SHAPES, 'Endicia MailPiece Shape'
+    )
+    endicia_shipment_bag = fields.Many2One(
+        'endicia.shipment.bag', 'Endicia Shipment Bag'
+    )
+    endicia_label_subtype = fields.Selection([
+        ('None', 'None'),
+        ('Integrated', 'Integrated')
+    ], 'Label Subtype')
+    endicia_integrated_form_type = fields.Selection([
+        (None, ''),
+        ('Form2976', 'Form2976(Same as CN22)'),
+        ('Form2976A', 'Form2976(Same as CP72)'),
+    ], 'Integrated Form Type')
+    endicia_include_postage = fields.Boolean('Include Postage ?')
+    endicia_package_type = fields.Selection(
+        ENDICIA_PACKAGE_TYPES, 'Package Content Type'
+    )
+    endicia_refunded = fields.Boolean('Refunded ?', readonly=True)
+
+
+class GenerateShippingLabel(Wizard):
+    'Generate Labels'
+    __name__ = 'generate.shipping.label'
+
+    endicia_config = StateView(
+        'shipping.carrier.endicia_configuration',
+        'endicia_integration.shipping_endicia_configuration_view_form',
+        [
+            Button('Back', 'start', 'tryton-go-previous'),
+            Button('Continue', 'generate', 'tryton-go-next'),
+        ]
+    )
+
+    def default_endicia_config(self, data):
+        Config = Pool().get('sale.configuration')
+        config = Config(1)
+        shipment = self.start.shipment
+
+        return {
+            'endicia_mailclass': (
+                shipment.endicia_mailclass and shipment.endicia_mailclass.id
+            ) or (
+                config.endicia_mailclass and config.endicia_mailclass.id
+            ) or None,
+            'endicia_mailpiece_shape': (
+                shipment.endicia_mailpiece_shape or
+                config.endicia_mailpiece_shape
+            ),
+            'endicia_label_subtype': (
+                shipment.endicia_label_subtype or config.endicia_label_subtype
+            ),
+            'endicia_integrated_form_type': (
+                shipment.endicia_integrated_form_type or
+                config.endicia_integrated_form_type
+            ),
+            'endicia_include_postage': (
+                shipment.endicia_include_postage or
+                config.endicia_include_postage
+            ),
+            'endicia_package_type': (
+                shipment.endicia_package_type or config.endicia_package_type
+            )
+        }
+
+    def transition_next(self):
+        if self.start.carrier.carrier_cost_method == 'endicia':
+            return 'endicia_config'
+        return super(GenerateShippingLabel, self).transition_next()
+
+    def update_shipment(self):
+        shipment = self.start.shipment
+
+        if self.start.carrier.carrier_cost_method == 'endicia':
+            shipment.endicia_mailclass = self.endicia_config.endicia_mailclass
+            shipment.endicia_mailpiece_shape = \
+                self.endicia_config.endicia_mailpiece_shape
+            shipment.endicia_shipment_bag = \
+                self.endicia_config.endicia_shipment_bag
+            shipment.endicia_label_subtype = \
+                self.endicia_config.endicia_label_subtype
+            shipment.endicia_integrated_form_type = \
+                self.endicia_config.endicia_integrated_form_type
+            shipment.endicia_package_type = \
+                self.endicia_config.endicia_package_type
+            shipment.endicia_include_postage = \
+                self.endicia_config.endicia_include_postage
+            shipment.endicia_shipment_bag = \
+                self.endicia_config.endicia_shipment_bag
+
+        return super(GenerateShippingLabel, self).update_shipment()
